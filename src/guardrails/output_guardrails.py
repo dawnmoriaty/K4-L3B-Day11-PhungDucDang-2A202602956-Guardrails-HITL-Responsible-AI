@@ -213,17 +213,19 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        # 1. Kiểm tra PII và thay thế bằng [REDACTED]
+        filter_result = content_filter(response_text)
+        if not filter_result["safe"]:
+            self.redacted_count += 1
+            # Cập nhật text trong response thành bản đã che [REDACTED]
+            if hasattr(llm_response, "content") and llm_response.content:
+                for part in llm_response.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        part.text = filter_result["redacted"]
 
-        if use_llm_judge and safety_judge_agent is not None:
-                judge_result = await llm_safety_check(response_text)
+        # 2. (Optional) Nếu bật Judge, kiểm tra thêm về mặt nội dung
+        if self.use_llm_judge and safety_judge_agent is not None:
+            judge_result = await llm_safety_check(response_text)
             if not judge_result["safe"]:
                 self.blocked_count += 1
                 # Tạo response từ chối an toàn thay cho response bị chặn
