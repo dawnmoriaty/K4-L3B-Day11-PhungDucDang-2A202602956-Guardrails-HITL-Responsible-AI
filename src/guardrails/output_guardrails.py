@@ -41,12 +41,13 @@ def content_filter(response: str) -> dict:
 
     # PII patterns to check
     PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
+        "phone": r"\b0\d{9,10}\b",
+        "email": r"\b[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}\b",
+        "national_id": r"\b\d{9}\b|\b\d{12}\b",
+        "api_key": r"sk-[a-zA-Z0-9-]{8,}",
+        "admin_password": r"\badmin123\b",
+        "password_assign": r"(?:password|mật\s*khẩu)\s*[:=]\s*\S+",
+        "db_host": r"db\.vinbank\.internal(?::\d+)?",
     }
 
     for name, pattern in PII_PATTERNS.items():
@@ -140,6 +141,46 @@ async def llm_safety_check(response_text: str) -> dict:
 #   - Return the (possibly modified) llm_response, or None to keep original
 # ============================================================
 
+async def after_model_callback(
+    self,
+    *,
+    callback_context,
+    llm_response,
+):
+    self.total_count += 1
+    response_text = self._extract_text(llm_response)
+    if not response_text:
+        return llm_response
+
+    # 1. Kiểm tra PII và thay thế bằng [REDACTED]
+    filter_result = content_filter(response_text)
+    if not filter_result["safe"]:
+        self.redacted_count += 1
+        # Cập nhật text trong response thành bản đã che [REDACTED]
+        if hasattr(llm_response, "content") and llm_response.content:
+            for part in llm_response.content.parts:
+                if hasattr(part, "text") and part.text:
+                    part.text = filter_result["redacted"]
+
+    # 2. (Optional) Nếu bật Judge, kiểm tra thêm về mặt nội dung
+    if self.use_llm_judge:
+        judge_result = await llm_safety_check(response_text)
+        if not judge_result["safe"]:
+            self.blocked_count += 1
+            # Tạo response từ chối an toàn thay cho response bị chặn
+            block_msg = (
+                "Tôi không thể trả lời yêu cầu này vì nó có thể chứa thông tin nhạy cảm hoặc "
+                "vi phạm chính sách an toàn của ngân hàng."
+            )
+            # Cập nhật response thành message từ chối
+            if hasattr(llm_response, "content") and llm_response.content:
+                for part in llm_response.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        part.text = block_msg
+
+    return llm_response
+
+
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
     """Plugin that checks agent output before sending to user."""
 
@@ -181,7 +222,21 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         #    - Increment self.blocked_count
         # 3. Return llm_response (possibly modified)
 
-        return llm_response  # TODO: modify if needed
+        if use_llm_judge and safety_judge_agent is not None:
+                judge_result = await llm_safety_check(response_text)
+            if not judge_result["safe"]:
+                self.blocked_count += 1
+                # Tạo response từ chối an toàn thay cho response bị chặn
+                block_msg = (
+                    "Tôi không thể trả lời yêu cầu này vì nó có thể chứa thông tin nhạy cảm hoặc "
+                    "vi phạm chính sách an toàn của ngân hàng."
+                )
+                # Cập nhật response thành message từ chối
+                if hasattr(llm_response, "content") and llm_response.content:
+                    for part in llm_response.content.parts:
+                        if hasattr(part, "text") and part.text:
+                            part.text = block_msg
+        return llm_response
 
 
 # ============================================================
